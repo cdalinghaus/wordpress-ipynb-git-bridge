@@ -10,23 +10,34 @@
 
 // Cache for 30 days
 $CACHE_DURATION_SECONDS = 60*60*24*30;
+// Where to store the images and cached notebook files
 $STORAGE_LOCATION = plugin_dir_path( __FILE__ ) . "../../uploads/ipynb-media/";
 
-function base64_to_jpeg( $base64_string, $file_extension ) {
+function base64_img_to_webp( $base64_string, $file_extension ) {
+    /**
+     * Convert base64 file to static .webp. Currently only implemented with .png,
+     * should^TM however work with .jpg as well
+     *
+     * @param $base64_string Base64 encoded image
+     * @param $file_extension File extension of the image
+     * 
+     * @return fill http path to the .webp image 
+     */
 
     global $STORAGE_LOCATION;
-    $storage_location = $STORAGE_LOCATION;
 
     // Create folder if not exists
+    // base64_img_to_webp is currently only called after the folder was already checked for
+    // (or created) so this is currently redundant
     if (!file_exists($storage_location)) {
-        mkdir($storage_location, 0777, true);
+         mkdir($STORAGE_LOCATION, 0777, true);
     }
 
     $filename = md5($base64_string) . "." . $file_extension;
 
     $md5filename = md5($base64_string);
 
-    $file = $storage_location . $filename;
+    $file = $STORAGE_LOCATION . $filename;
 
     $ifp = fopen( $file, "wa+" ); 
     fwrite( $ifp, base64_decode( $base64_string) ); 
@@ -36,7 +47,7 @@ function base64_to_jpeg( $base64_string, $file_extension ) {
     imagepalettetotruecolor($img);
     imagealphablending($img, true);
     imagesavealpha($img, true);
-    imagewebp($img, $dir . $storage_location . $md5filename  . ".webp", 100);
+    imagewebp($img, $dir . $STORAGE_LOCATION . $md5filename  . ".webp", 100);
     imagedestroy($img);
     unlink($file);
 
@@ -44,23 +55,26 @@ function base64_to_jpeg( $base64_string, $file_extension ) {
 }
 
 
-function optimize_json($json) {
-    $json = json_decode($json, true);
+function optimize_json($jsonstring) {
+    /**
+     * "Optimizes" json i.e. turns base64 images into static .webp files and the metadata cell if it can be found 
+     *
+     * @param $jsonstring String of notebook json
+     * 
+     * @return "Optimized" json as per definition above
+     */ 
+    $json = json_decode($jsonstring, true);
     
+    // Convert base64 cell outputs to img src
     $base64_cells = array("image/png", "png");
-
     foreach($json["cells"] as $cellindex => &$cell) {
         foreach($cell["outputs"] as $outputindex => &$output) {
 
             foreach($output["data"] as $dataindex => &$data) {
                 if(in_array($dataindex, $base64_cells)) {
 
-                    $data = base64_to_jpeg($data, "png");
-
-                    $output["data"] = array("text/markdown" => "<img src='" . $data . "'>");
-
-
-
+                    $filepath = base64_img_to_webp($data, "png");
+                    $output["data"] = array("text/markdown" => "<img src='" . $filepath . "' />");
                 }
             }
         }
@@ -68,7 +82,7 @@ function optimize_json($json) {
 
     // If metadata cell exists, remove it
     if(0 === strcmp(rmnewline($json["cells"][0]["source"][0]), "%META")) {
-        // Metadata cell present
+        // Metadata cell is present, remove it
         array_shift($json["cells"]);
     }
 
@@ -76,11 +90,19 @@ function optimize_json($json) {
 }
 
 function download_from_github($raw_url) {
+    /**
+     * Downloads a file from github
+     *
+     * @param $raw_url raw url to .ipynb file hosted on github
+     * 
+     * @return file content as string 
+     */
+
     // Convert github url to raw.githubusercontent.com url
     $raw_url = str_replace("github.com", "raw.githubusercontent.com", $raw_url);
     $raw_url = str_replace("/blob/", "/", $raw_url);
 
-    // Download json from github
+    // Download file content from github
     $result = wp_remote_get($raw_url);
     return $result["body"];
 }
@@ -93,25 +115,26 @@ function inject_notebook($atts) {
      * @param array $atts Attribute array from wp shortcode. Should contain notebook url as first element
      * 
      * @return NULL
-     */ 
+     */
     
     load_js_files();
     wp_localize_script('mylib', 'WPURLS', array( 'siteurl' => get_option('siteurl') ));
 
     add_action( 'wp_footer', function() use( $atts ){
-        $cache_storage_location = plugin_dir_path( __FILE__ ) . "../../uploads/ipynb-media/";
+        global $STORAGE_LOCATION;
+
         $cachefilename = md5(reset($atts)) . ".ipynbcache";
 
-        // Check if file is older than 30 days. If it is: Empty cache
+        // Check if file is older than $CACHE_FURATION_SECONDS. If it is: Remove the .ipynbcache file from disk
         global $CACHE_DURATION_SECONDS;
-        if (time()-filemtime($cache_storage_location . $cachefilename) > $CACHE_DURATION_SECONDS) {
-            // file older than 2 hours
-            unlink($cache_storage_location . $cachefilename);
+        if (time()-filemtime($STORAGE_LOCATION . $cachefilename) > $CACHE_DURATION_SECONDS) {
+            // file older than $CACHE_FURATION_SECONDS, delete it
+            unlink($STORAGE_LOCATION . $cachefilename);
         } else {
-            echo "Render is " . (time()-filemtime($cache_storage_location . $cachefilename)) . " seconds old";
+            echo "Render is " . (time()-filemtime($STORAGE_LOCATION . $cachefilename)) . " seconds old";
         }
 
-        if(!file_exists($cache_storage_location . $cachefilename)) {
+        if(!file_exists($STORAGE_LOCATION . $cachefilename)) {
 
             $result = download_from_github(reset($atts));
             echo "Render is fresh";
@@ -119,19 +142,20 @@ function inject_notebook($atts) {
             // Update post metadata
             parse_metadata(get_the_ID(), $result);
 
-            // Optimize json
-            $optimized_json = optimize_json($result);
-            
             global $STORAGE_LOCATION;
             // Create folder if not exists
             if (!file_exists($storage_location)) {
                  mkdir($STORAGE_LOCATION, 0777, true);
             }
 
-            file_put_contents($cache_storage_location . $cachefilename, $optimized_json);
+            // Optimize json
+            $optimized_json = optimize_json($result);
+
+            // Persist the file to disk
+            file_put_contents($STORAGE_LOCATION . $cachefilename, $optimized_json);
 
         } else {
-            $optimized_json = file_get_contents($cache_storage_location . $cachefilename);
+            $optimized_json = file_get_contents($STORAGE_LOCATION . $cachefilename);
         }
 
         $jsontext = $optimized_json;
@@ -175,8 +199,6 @@ function load_js_files() {
     wp_enqueue_script( "nbpreview", $plugin_url . "js/nbpreview.js", array(), 1.0, true);
     wp_localize_script('nbpreview', 'WPURLS', array( 'siteurl' => get_option('siteurl') ));
 }
-
-// this function makes all posts in the default category private
  
 // source https://gist.github.com/mrbobbybryant/a18588f86b12fa71224b
 function parse_shortcode_atts( $content, $shortcode ) {
@@ -218,7 +240,15 @@ function parse_shortcode_atts( $content, $shortcode ) {
 	//If no attributes are returned, then an ID Att isn't present.
 	return false;
 }
+
 function rmnewline($string) {
+    /**
+     * Removes newlines from $string
+     *
+     * @param $string String to remove newlines from
+     * 
+     * @return $string without newlines
+     */
     return preg_replace('/\s+/', ' ', trim($string));
 }
 
@@ -232,8 +262,7 @@ function get_or_create_category($string) {
 }
 
 // Source: https://stackoverflow.com/questions/2955251/php-function-to-make-slug-url-string
-function slugify($text, string $divider = '-')
-{
+function slugify($text, string $divider = '-') {
   // replace non letter or digits by divider
   $text = preg_replace('~[^\pL\d]+~u', $divider, $text);
 
@@ -259,22 +288,6 @@ function slugify($text, string $divider = '-')
   return $text;
 }
 
-//Source: https://gist.github.com/tallesairan/3ad2f37a73ae1a1f5a2d704e98c9556c
-function post_exists_by_slug( $post_slug,$type = 'post') {
-  $args_posts = array(
-      'post_type'      => $type,
-      'name'           => $post_slug,
-      'posts_per_page' => 1,
-  );
-  $loop_posts = new WP_Query( $args_posts );
-  if ( ! $loop_posts->have_posts() ) {
-      return false;
-  } else {
-      $loop_posts->the_post();
-
-      return $loop_posts->post->ID;
-  }
-}
 
 function parse_metadata($post_id, $jsonstring = false) {
     if( ! ( wp_is_post_revision( $post_id) || wp_is_post_autosave( $post_id ) ) ) {
@@ -282,12 +295,13 @@ function parse_metadata($post_id, $jsonstring = false) {
 	$post_content = get_post($post_id)->post_content;
 
         if (false === strpos($post_content, '[ipynb') ) {
+            // No ipynb shortcode is present in this post
             return;
         }
 	    
         $result = parse_shortcode_atts($post_content, "ipynb");
         if(count($result) != 1) {
-            // Can't work with multiple shortcodes
+            // Can't work with multiple shortcodes, return
             return;
         }
         
@@ -302,10 +316,12 @@ function parse_metadata($post_id, $jsonstring = false) {
             return;
         }
 
+        // initialize $post_update with post id so wp_update_post can identity the post
         $post_update = array(
             'ID'         => $post_id,
         );
 
+        // Iterate over every line in meta cell, parse key/value and insert value into post_update if key is recognized
         foreach($json["cells"][0]["source"] as $line) {
             $exploded = explode("=", $line);
             $key = $exploded[0];
@@ -316,17 +332,20 @@ function parse_metadata($post_id, $jsonstring = false) {
                     $post_update += array("post_title" => $value);
                     $post_update += array("post_name" => slugify($value));
                     break;
-
-                case "excerpt": $post_update += array("post_excerpt" => $value); break;
-                case "tags": $post_update += array("tags_input" => explode(",", $value)); break;
+                case "excerpt":
+                    $post_update += array("post_excerpt" => $value);
+                    break;
+                case "tags":
+                    $post_update += array("tags_input" => explode(",", $value));
+                    break;
                 case "categories": 
                     $catids = array_map("get_or_create_category", explode(",", $value));
                     $post_update += array("post_category" => $catids);
                     break;
-                case "slug": $post_update += array("tags_input" => explode(",", $value)); break;
             }
         }
 
+        // wp_update_post calls save_post so we have to unhook it to avoid an infinite recusive loop
         remove_action( 'save_post', 'parse_metadata' );
         wp_update_post( $post_update );
         add_action( 'save_post', 'parse_metadata' );
@@ -334,8 +353,14 @@ function parse_metadata($post_id, $jsonstring = false) {
 
 }
 
+// Where to actually hook into wordpress
+
+// Extract metadata on post save
 add_action( 'save_post', 'parse_metadata' );
 
+// Extract metadata when the shortcode is loaded
+// If not loaded from cache, this will also call parse_metadata
+// (in case the metadata changed)
 add_shortcode('ipynb', 'inject_notebook', 10000);
 
 
